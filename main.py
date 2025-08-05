@@ -77,7 +77,7 @@ def create_langchain_qa_chain(chunks: List[str]):
     db = FAISS.from_documents(documents, embeddings)
     llm = AzureChatOpenAI(
         temperature=0,
-        deployment_name=os.getenv("model"),  # ✅ matches your working config
+        deployment_name=os.getenv("model"),
         openai_api_base=os.getenv("AZURE_API_BASE"),
         openai_api_version=os.getenv("AZURE_API_VERSION"),
         openai_api_key=os.getenv("AZURE_API_KEY"),
@@ -94,7 +94,7 @@ def query_with_langchain(query: str, chain) -> dict:
 
         llm = AzureChatOpenAI(
             temperature=0,
-            deployment_name=os.getenv("model"),  # ✅ same fix here
+            deployment_name=os.getenv("model"),
             openai_api_base=os.getenv("AZURE_API_BASE"),
             openai_api_version=os.getenv("AZURE_API_VERSION"),
             openai_api_key=os.getenv("AZURE_API_KEY"),
@@ -146,8 +146,8 @@ def query_with_langchain(query: str, chain) -> dict:
         raise HTTPException(status_code=500, detail=f"LangChain query failed: {e}")
 
 # ---------- API Endpoint ----------
-@app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_document(query: str = Form(...), file: UploadFile = File(...)):
+@app.post("/hackrx/run", response_model=AnalysisResponse)
+async def hackrx_run(query: str = Form(...), file: UploadFile = File(...)):
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
