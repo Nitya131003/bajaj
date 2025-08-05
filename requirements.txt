@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+numpy
+python-multipart
+pydantic
+PyMuPDF
+docx2txt
+sentence-transformers
+faiss-cpu
+langchain
+openai
+python-dotenv
+langchain-community
+extract-msg
+pytesseract
+Pillow
+pdfplumber
