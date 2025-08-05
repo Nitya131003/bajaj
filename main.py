@@ -6,21 +6,15 @@ import fitz  # PyMuPDF
 import docx2txt
 from email import policy
 from email.parser import BytesParser
-from sentence_transformers import SentenceTransformer
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.chains import RetrievalQA
 from langchain.schema.document import Document
+from langchain_openai import AzureOpenAIEmbeddings
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
-# Load embedding model
-print("Loading embedding model...")
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-print("Model loaded successfully.")
 
 # Response model
 class AnalysisResponse(BaseModel):
@@ -73,8 +67,19 @@ def detect_file_type_and_extract(file: UploadFile, file_bytes: bytes) -> str:
 # ---------- LangChain Setup ----------
 def create_langchain_qa_chain(chunks: List[str]):
     documents = [Document(page_content=chunk) for chunk in chunks]
-    embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+
+    # ✅ Use Azure OpenAI Embeddings
+    embeddings = AzureOpenAIEmbeddings(
+        deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
+        model="text-embedding-ada-002",  # default model
+        openai_api_base=os.getenv("AZURE_API_BASE"),
+        openai_api_version=os.getenv("AZURE_API_VERSION"),
+        openai_api_key=os.getenv("AZURE_API_KEY"),
+        openai_api_type="azure"
+    )
+
     db = FAISS.from_documents(documents, embeddings)
+    
     llm = AzureChatOpenAI(
         temperature=0,
         deployment_name=os.getenv("model"),
@@ -83,6 +88,7 @@ def create_langchain_qa_chain(chunks: List[str]):
         openai_api_key=os.getenv("AZURE_API_KEY"),
         openai_api_type="azure"
     )
+    
     return RetrievalQA.from_chain_type(llm=llm, retriever=db.as_retriever(), return_source_documents=True)
 
 # ---------- Query ----------
@@ -146,8 +152,8 @@ def query_with_langchain(query: str, chain) -> dict:
         raise HTTPException(status_code=500, detail=f"LangChain query failed: {e}")
 
 # ---------- API Endpoint ----------
-@app.post("/hackrx/run", response_model=AnalysisResponse)
-async def hackrx_run(query: str = Form(...), file: UploadFile = File(...)):
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze_document(query: str = Form(...), file: UploadFile = File(...)):
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
