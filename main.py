@@ -149,7 +149,7 @@ def query_with_langchain(query: str, chain) -> dict:
         raise HTTPException(status_code=500, detail=f"LangChain query failed: {e}")
 
 # ---------- API Endpoint ----------
-@app.post("/analyze", response_model=AnalysisResponse)
+@app.post("/api/v1/hackrx/run", response_model=AnalysisResponse)
 async def analyze_document(query: str = Form(...), file: UploadFile = File(...)):
     file_bytes = await file.read()
     if not file_bytes:
@@ -164,3 +164,4 @@ async def analyze_document(query: str = Form(...), file: UploadFile = File(...))
 @app.get("/")
 def health():
     return {"status": "Running", "message": "AI Insurance Analyzer is live."}
+
