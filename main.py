@@ -68,14 +68,13 @@ def detect_file_type_and_extract(file: UploadFile, file_bytes: bytes) -> str:
 def create_langchain_qa_chain(chunks: List[str]):
     documents = [Document(page_content=chunk) for chunk in chunks]
 
-    # ✅ Use Azure OpenAI Embeddings
+    # ✅ Use Azure OpenAI Embeddings with updated param
     embeddings = AzureOpenAIEmbeddings(
         deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
-        model=os.getenv("model"),  # default model
-        openai_api_base=os.getenv("AZURE_API_BASE"),
+        model=os.getenv("model"),
+        azure_endpoint=os.getenv("AZURE_API_BASE"),  # ✅ updated
         openai_api_version=os.getenv("AZURE_API_VERSION"),
-        openai_api_key=os.getenv("AZURE_API_KEY"),
-        openai_api_type="azure"
+        openai_api_key=os.getenv("AZURE_API_KEY")
     )
 
     db = FAISS.from_documents(documents, embeddings)
@@ -83,10 +82,9 @@ def create_langchain_qa_chain(chunks: List[str]):
     llm = AzureChatOpenAI(
         temperature=0,
         deployment_name=os.getenv("model"),
-        openai_api_base=os.getenv("AZURE_API_BASE"),
+        azure_endpoint=os.getenv("AZURE_API_BASE"),  # ✅ updated
         openai_api_version=os.getenv("AZURE_API_VERSION"),
-        openai_api_key=os.getenv("AZURE_API_KEY"),
-        openai_api_type="azure"
+        openai_api_key=os.getenv("AZURE_API_KEY")
     )
     
     return RetrievalQA.from_chain_type(llm=llm, retriever=db.as_retriever(), return_source_documents=True)
@@ -101,10 +99,9 @@ def query_with_langchain(query: str, chain) -> dict:
         llm = AzureChatOpenAI(
             temperature=0,
             deployment_name=os.getenv("model"),
-            openai_api_base=os.getenv("AZURE_API_BASE"),
+            azure_endpoint=os.getenv("AZURE_API_BASE"),  # ✅ updated
             openai_api_version=os.getenv("AZURE_API_VERSION"),
-            openai_api_key=os.getenv("AZURE_API_KEY"),
-            openai_api_type="azure"
+            openai_api_key=os.getenv("AZURE_API_KEY")
         )
 
         # Decision Prompt
@@ -167,4 +164,3 @@ async def analyze_document(query: str = Form(...), file: UploadFile = File(...))
 @app.get("/")
 def health():
     return {"status": "Running", "message": "AI Insurance Analyzer is live."}
-
