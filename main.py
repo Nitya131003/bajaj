@@ -71,7 +71,7 @@ def create_langchain_qa_chain(chunks: List[str]):
     # ✅ Use Azure OpenAI Embeddings
     embeddings = AzureOpenAIEmbeddings(
         deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
-        model="text-embedding-ada-002",  # default model
+        model=os.getenv("model"),  # default model
         openai_api_base=os.getenv("AZURE_API_BASE"),
         openai_api_version=os.getenv("AZURE_API_VERSION"),
         openai_api_key=os.getenv("AZURE_API_KEY"),
@@ -167,3 +167,4 @@ async def analyze_document(query: str = Form(...), file: UploadFile = File(...))
 @app.get("/")
 def health():
     return {"status": "Running", "message": "AI Insurance Analyzer is live."}
+
