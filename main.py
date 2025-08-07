@@ -1,8 +1,9 @@
 import os
 import requests
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import fitz  # PyMuPDF
 import docx2txt
 from email import policy
@@ -13,9 +14,55 @@ from langchain.chains import RetrievalQA
 from langchain.schema.document import Document
 from langchain_openai import AzureOpenAIEmbeddings
 from dotenv import load_dotenv
+from fastapi.openapi.utils import get_openapi
+from fastapi import Header, status
 
 # Load environment variables
 load_dotenv()
+
+# ----------- Auth Setup -----------
+EXPECTED_TOKEN = os.getenv("API_TOKEN")
+
+app = FastAPI()
+
+# Dependency to check token
+def verify_token(authorization: str = Header(...)):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token format")
+    
+    token = authorization.replace("Bearer ", "")
+    if token != EXPECTED_TOKEN:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+
+# ----------- FastAPI Init + Swagger Auth Support -----------
+app = FastAPI(
+    title="AI Insurance Analyzer API",
+    description="Batch Q&A over insurance documents using LLMs",
+    version="2.0.0"
+)
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer"
+        }
+    }
+    for path in openapi_schema["paths"].values():
+        for method in path.values():
+            method.setdefault("security", [{"BearerAuth": []}])
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # ----------- Input/Output Models -----------
 class AnalyzeRequest(BaseModel):
@@ -25,20 +72,13 @@ class AnalyzeRequest(BaseModel):
 class AnalyzeResponse(BaseModel):
     answers: List[str]
 
-# ----------- App Init -----------
-app = FastAPI(
-    title="AI Insurance Analyzer API",
-    description="Batch Q&A over insurance documents using LLMs",
-    version="2.0.0"
-)
-
-# ----------- File Extraction Helpers -----------
+# ----------- File Extraction -----------
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         return "".join(page.get_text("text") for page in doc)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process PDF: {e}")
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     try:
@@ -46,37 +86,31 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
             f.write(file_bytes)
         return docx2txt.process("temp.docx")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DOCX extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process DOCX: {e}")
 
 def extract_text_from_email(file_bytes: bytes) -> str:
     try:
         msg = BytesParser(policy=policy.default).parsebytes(file_bytes)
-        body = msg.get_body(preferencelist=('plain', 'html'))
-        if body:
-            return body.get_content()
-        else:
-            raise ValueError("Email body could not be extracted")
+        return msg.get_body(preferencelist=('plain', 'html')).get_content()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Email extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process Email: {e}")
 
 def detect_file_type_and_extract(url: str) -> str:
     try:
         response = requests.get(url)
-        if response.status_code != 200:
-            raise ValueError(f"Failed to fetch file from URL, status code {response.status_code}")
         file_bytes = response.content
         content_type = response.headers.get("Content-Type", "")
 
         if "pdf" in content_type:
             return extract_text_from_pdf(file_bytes)
-        elif "wordprocessingml" in content_type or "docx" in content_type:
+        elif "wordprocessingml" in content_type:
             return extract_text_from_docx(file_bytes)
         elif "message" in content_type or content_type == "application/octet-stream":
             return extract_text_from_email(file_bytes)
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching or parsing document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch document from URL: {e}")
 
 # ----------- LangChain Setup -----------
 def create_langchain_chain(chunks: List[str]):
@@ -102,7 +136,7 @@ def create_langchain_chain(chunks: List[str]):
 
     return RetrievalQA.from_chain_type(llm=llm, retriever=db.as_retriever(), return_source_documents=True)
 
-# ----------- Query Runner -----------
+# ----------- QA Logic -----------
 def run_batch_questions(questions: List[str], chain) -> List[str]:
     llm = AzureChatOpenAI(
         temperature=0,
@@ -118,37 +152,35 @@ def run_batch_questions(questions: List[str], chain) -> List[str]:
             result = chain(query)
             context = "\n\n".join(doc.page_content for doc in result['source_documents'][:3])
 
-            prompt = f"""
+            final_prompt = f"""
             You are a smart insurance policy assistant.
-            Based ONLY on the following policy excerpts:
+            Based only on the following excerpts from the policy:
             {context}
 
             Question: "{query}"
 
-            Answer concisely, citing clauses if needed, with no outside assumptions.
+            Provide a concise, direct answer based strictly on the clauses above.
+            Avoid assumptions. Mention specific clauses if helpful.
             """
-            response = llm.predict(prompt).strip()
+            response = llm.predict(final_prompt).strip()
             answers.append(response)
         except Exception as e:
-            answers.append(f"Error answering question: {str(e)}")
+            answers.append(f"Error answering question: {e}")
 
     return answers
 
-# ----------- API Endpoint -----------
+# ----------- API Endpoints -----------
 @app.post("/api/v1/hackrx/run", response_model=AnalyzeResponse)
-async def analyze_from_url(
-    req: AnalyzeRequest,
-    authorization: Optional[str] = Header(None)
-):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid authorization token.")
-
+async def analyze_from_url(req: AnalyzeRequest, token: str = Depends(verify_token)):
     document_text = detect_file_type_and_extract(req.documents)
     chunks = [document_text[i:i + 1000] for i in range(0, len(document_text), 850)]
     chain = create_langchain_chain(chunks)
     answers = run_batch_questions(req.questions, chain)
     return AnalyzeResponse(answers=answers)
 
-@app.get("/")
-def health():
-    return {"status": "ok", "message": "AI Insurance Analyzer is running."}
+@app.get("/token")
+def get_token():
+    return {"token": os.getenv("API_TOKEN")}
+
+def root():
+    return {"message": "AI Insurance Document Analyzer is running"}
