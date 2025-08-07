@@ -13,6 +13,7 @@ from langchain.chains import RetrievalQA
 from langchain.schema.document import Document
 from langchain_openai import AzureOpenAIEmbeddings
 from dotenv import load_dotenv
+from fastapi.responses import Response
 
 # Load environment variables
 load_dotenv()
@@ -140,3 +141,8 @@ async def analyze_from_url(req: AnalyzeRequest):
 @app.get("/")
 def root():
     return {"message": "AI Insurance Document Analyzer is running"}
+
+@app.head("/ping")
+async def head_ping():
+    return Response(status_code=200)
+
