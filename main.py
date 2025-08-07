@@ -1,7 +1,6 @@
 import os
 import requests
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
 import fitz  # PyMuPDF
@@ -14,55 +13,15 @@ from langchain.chains import RetrievalQA
 from langchain.schema.document import Document
 from langchain_openai import AzureOpenAIEmbeddings
 from dotenv import load_dotenv
-from fastapi.openapi.utils import get_openapi
-from fastapi import Header, status
 
 # Load environment variables
 load_dotenv()
 
-# ----------- Auth Setup -----------
-EXPECTED_TOKEN = os.getenv("API_TOKEN")
-
-app = FastAPI()
-
-# Dependency to check token
-def verify_token(authorization: str = Header(...)):
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token format")
-    
-    token = authorization.replace("Bearer ", "")
-    if token != EXPECTED_TOKEN:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-
-# ----------- FastAPI Init + Swagger Auth Support -----------
 app = FastAPI(
     title="AI Insurance Analyzer API",
     description="Batch Q&A over insurance documents using LLMs",
     version="2.0.0"
 )
-
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    openapi_schema["components"]["securitySchemes"] = {
-        "BearerAuth": {
-            "type": "http",
-            "scheme": "bearer"
-        }
-    }
-    for path in openapi_schema["paths"].values():
-        for method in path.values():
-            method.setdefault("security", [{"BearerAuth": []}])
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi
 
 # ----------- Input/Output Models -----------
 class AnalyzeRequest(BaseModel):
@@ -171,16 +130,13 @@ def run_batch_questions(questions: List[str], chain) -> List[str]:
 
 # ----------- API Endpoints -----------
 @app.post("/api/v1/hackrx/run", response_model=AnalyzeResponse)
-async def analyze_from_url(req: AnalyzeRequest, token: str = Depends(verify_token)):
+async def analyze_from_url(req: AnalyzeRequest):
     document_text = detect_file_type_and_extract(req.documents)
     chunks = [document_text[i:i + 1000] for i in range(0, len(document_text), 850)]
     chain = create_langchain_chain(chunks)
     answers = run_batch_questions(req.questions, chain)
     return AnalyzeResponse(answers=answers)
 
-@app.get("/token")
-def get_token():
-    return {"token": os.getenv("API_TOKEN")}
-
+@app.get("/")
 def root():
     return {"message": "AI Insurance Document Analyzer is running"}
