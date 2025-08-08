@@ -1,5 +1,7 @@
 import os
 import requests
+import asyncio
+import hashlib
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
@@ -12,6 +14,7 @@ from langchain_community.chat_models import AzureChatOpenAI
 from langchain.chains import RetrievalQA
 from langchain.schema.document import Document
 from langchain_openai import AzureOpenAIEmbeddings
+from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 from fastapi.responses import Response
 
@@ -27,10 +30,19 @@ app = FastAPI(
 # ----------- Input/Output Models -----------
 class AnalyzeRequest(BaseModel):
     documents: str  # URL to document
-    questions: List[str]
+    questions: List[str]  # No limit enforced
 
 class AnalyzeResponse(BaseModel):
     answers: List[str]
+
+# ----------- Cache Settings -----------
+INDEX_CACHE = {}
+CACHE_DIR = "faiss_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+def get_doc_hash(text: str) -> str:
+    """Hash document text for caching."""
+    return hashlib.md5(text.encode()).hexdigest()
 
 # ----------- File Extraction -----------
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -57,7 +69,8 @@ def extract_text_from_email(file_bytes: bytes) -> str:
 
 def detect_file_type_and_extract(url: str) -> str:
     try:
-        response = requests.get(url)
+        session = requests.Session()
+        response = session.get(url)
         file_bytes = response.content
         content_type = response.headers.get("Content-Type", "")
 
@@ -72,10 +85,24 @@ def detect_file_type_and_extract(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch document from URL: {e}")
 
-# ----------- LangChain Setup -----------
-def create_langchain_chain(chunks: List[str]):
-    documents = [Document(page_content=chunk) for chunk in chunks]
+# ----------- Prompt -----------
+INSURANCE_PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""
+You are a smart insurance policy assistant.
+Based only on the following excerpts from the policy:
+{context}
 
+Question: "{question}"
+
+Provide a concise, direct answer based strictly on the clauses above.
+Avoid assumptions. Mention specific clauses if helpful.
+"""
+)
+
+# ----------- FAISS Utilities -----------
+def build_faiss_from_chunks(chunks: List[str]) -> FAISS:
+    documents = [Document(page_content=chunk) for chunk in chunks]
     embeddings = AzureOpenAIEmbeddings(
         deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
         model=os.getenv("model"),
@@ -83,9 +110,23 @@ def create_langchain_chain(chunks: List[str]):
         openai_api_version=os.getenv("AZURE_API_VERSION"),
         openai_api_key=os.getenv("AZURE_API_KEY")
     )
+    return FAISS.from_documents(documents, embeddings)
 
-    db = FAISS.from_documents(documents, embeddings)
+def save_faiss_to_disk(faiss_index: FAISS, path: str):
+    faiss_index.save_local(path)
 
+def load_faiss_from_disk(path: str) -> FAISS:
+    embeddings = AzureOpenAIEmbeddings(
+        deployment=os.getenv("AZURE_EMBEDDING_DEPLOYMENT"),
+        model=os.getenv("model"),
+        azure_endpoint=os.getenv("AZURE_API_BASE"),
+        openai_api_version=os.getenv("AZURE_API_VERSION"),
+        openai_api_key=os.getenv("AZURE_API_KEY")
+    )
+    return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
+
+# ----------- LangChain Chain Creation -----------
+def create_langchain_chain_with_prompt(faiss_index: FAISS):
     llm = AzureChatOpenAI(
         temperature=0,
         deployment_name=os.getenv("model"),
@@ -93,49 +134,57 @@ def create_langchain_chain(chunks: List[str]):
         openai_api_version=os.getenv("AZURE_API_VERSION"),
         openai_api_key=os.getenv("AZURE_API_KEY")
     )
-
-    return RetrievalQA.from_chain_type(llm=llm, retriever=db.as_retriever(), return_source_documents=True)
-
-# ----------- QA Logic -----------
-def run_batch_questions(questions: List[str], chain) -> List[str]:
-    llm = AzureChatOpenAI(
-        temperature=0,
-        deployment_name=os.getenv("model"),
-        azure_endpoint=os.getenv("AZURE_API_BASE"),
-        openai_api_version=os.getenv("AZURE_API_VERSION"),
-        openai_api_key=os.getenv("AZURE_API_KEY")
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=faiss_index.as_retriever(),
+        return_source_documents=False,
+        chain_type_kwargs={"prompt": INSURANCE_PROMPT}
     )
 
-    answers = []
-    for query in questions:
-        try:
-            result = chain(query)
-            context = "\n\n".join(doc.page_content for doc in result['source_documents'][:3])
+def get_chain_with_cache(document_text: str):
+    doc_hash = get_doc_hash(document_text)
 
-            final_prompt = f"""
-            You are a smart insurance policy assistant.
-            Based only on the following excerpts from the policy:
-            {context}
+    if doc_hash in INDEX_CACHE:
+        return INDEX_CACHE[doc_hash]
 
-            Question: "{query}"
+    cache_path = os.path.join(CACHE_DIR, doc_hash)
+    if os.path.exists(cache_path):
+        faiss_index = load_faiss_from_disk(cache_path)
+        chain = create_langchain_chain_with_prompt(faiss_index)
+        INDEX_CACHE[doc_hash] = chain
+        return chain
 
-            Provide a concise, direct answer based strictly on the clauses above.
-            Avoid assumptions. Mention specific clauses if helpful.
-            """
-            response = llm.predict(final_prompt).strip()
-            answers.append(response)
-        except Exception as e:
-            answers.append(f"Error answering question: {e}")
+    chunks = [document_text[i:i + 2000] for i in range(0, len(document_text), 1800)]
+    faiss_index = build_faiss_from_chunks(chunks)
+    save_faiss_to_disk(faiss_index, cache_path)
+    chain = create_langchain_chain_with_prompt(faiss_index)
+    INDEX_CACHE[doc_hash] = chain
+    return chain
 
-    return answers
+# ----------- QA Logic (Parallel, Unlimited) -----------
+async def ask_question(query: str, chain) -> str:
+    try:
+        result = await asyncio.to_thread(chain.run, query)
+        return result.strip()
+    except Exception as e:
+        return f"Error answering question: {e}"
+
+async def process_in_batches(questions: List[str], chain, batch_size: int = 20):
+    """Process questions in smaller batches to avoid memory overload."""
+    results = []
+    for i in range(0, len(questions), batch_size):
+        batch = questions[i:i+batch_size]
+        batch_results = await asyncio.gather(*[ask_question(q, chain) for q in batch])
+        results.extend(batch_results)
+    return results
 
 # ----------- API Endpoints -----------
 @app.post("/api/v1/hackrx/run", response_model=AnalyzeResponse)
 async def analyze_from_url(req: AnalyzeRequest):
     document_text = detect_file_type_and_extract(req.documents)
-    chunks = [document_text[i:i + 1000] for i in range(0, len(document_text), 850)]
-    chain = create_langchain_chain(chunks)
-    answers = run_batch_questions(req.questions, chain)
+    chain = get_chain_with_cache(document_text)
+
+    answers = await process_in_batches(req.questions, chain)
     return AnalyzeResponse(answers=answers)
 
 @app.get("/")
@@ -145,4 +194,3 @@ def root():
 @app.head("/ping")
 async def head_ping():
     return Response(status_code=200)
-
