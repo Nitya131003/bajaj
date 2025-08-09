@@ -117,6 +117,7 @@ def extract_text_from_email(file_bytes: bytes) -> str:
 
 def detect_file_type_and_extract(url: str) -> str:
     try:
+        logger.info(f"Fetching document from URL: {url}")
         response = requests.get(url)
         response.raise_for_status()
         file_bytes = response.content
@@ -146,7 +147,7 @@ INSTRUCTIONS:
 1. Answer based ONLY on the information provided in the context above
 2. Quote exact text from the policy when possible
 3. If the question asks about specific periods, amounts, or conditions, provide the exact details
-4. If the information is not found in the context,give response as the nearest closest answer with appropriate details.
+4. If the information is not found in the context, state "Information not available in the provided context"
 5. Be concise but complete
 6. Always specify exact durations/amounts for waiting periods, grace periods, and coverage limits
 7. Mention conditions or exceptions if applicable
@@ -298,10 +299,36 @@ async def process_in_batches(questions: List[str], chain, batch_size: int = 15):
 
 @app.post("/api/v1/hackrx/run", response_model=AnalyzeResponse)
 async def analyze_from_url(req: AnalyzeRequest):
-    document_text = detect_file_type_and_extract(req.documents)
-    chain = get_chain_with_cache(document_text)
+    # Split multiple URLs by comma and clean spaces
+    urls = [u.strip() for u in req.documents.split(",") if u.strip()]
+    logger.info(f"📄 Received {len(urls)} document URLs:")
+    for i, url in enumerate(urls, 1):
+        logger.info(f"   Doc {i}: {url}")
+
+    logger.info(f"📝 Received {len(req.questions)} questions:")
+    for idx, q in enumerate(req.questions, 1):
+        logger.info(f"   Q{idx}: {q}")
+
+    # Extract text from all URLs and combine
+    all_texts = []
+    for url in urls:
+        text = detect_file_type_and_extract(url)
+        if text.strip():
+            all_texts.append(text)
+
+    if not all_texts:
+        raise HTTPException(status_code=400, detail="No extractable text found in provided URLs")
+
+    # Merge all document texts into one
+    combined_text = "\n\n".join(all_texts)
+
+    # Create chain using combined text
+    chain = get_chain_with_cache(combined_text)
+   
+    # Process questions
     answers = await process_in_batches(req.questions, chain)
     return AnalyzeResponse(answers=answers)
+
 
 @app.get("/")
 def root():
