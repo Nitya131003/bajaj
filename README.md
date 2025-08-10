@@ -41,6 +41,29 @@ We have comprehensively addressed the problem statement by creating a system tha
 
 ---
 
+## How it works (step-by-step)
+
+1. Client POSTs to `/api/v1/hackrx/run` with `documents` (comma-separated URLs) and `questions` (list of queries).
+
+2. For each URL the server attempts to fetch raw content. If the URL returns HTML/JSON/plain token text it may be used directly (useful for simple API endpoints).
+
+3. Otherwise the URL is downloaded and file type is detected; extraction is done with:
+   - **PDFs:** PyMuPDF text extraction; fallback: convert pages to images (`pdf2image`) + OCR (`pytesseract`).
+   - **DOCX:** `docx2txt`
+   - **EML:** `email.parser.BytesParser`
+
+4. Extracted text is normalized (remove hyphen-newlines, collapse whitespace).
+
+5. If the document language is not English, the LLM is used to translate the document into English for indexing.
+
+6. Text is chunked (`chunk_size=1200`, `chunk_overlap=200`) and embedded using Azure embeddings.
+
+7. A `RetrievalQA` chain is created using the FAISS retriever and a conservative prompt template (`GENERIC_PROMPT`) that instructs the LLM to answer only from context and avoid hallucination.
+
+8. For each question the system either runs a specialized procedural flow or routes the question to the chain. The final answer is returned in an `answers` array.
+
+---
+
 ## Caching & Persistence
 - Uses **FAISS** for persistent local storage.  
 - Cache prevents redundant embedding generation.  
@@ -57,7 +80,9 @@ We have comprehensively addressed the problem statement by creating a system tha
 ## Example: Sample Policy Test (Knee Surgery)
 - Upload medical policy documents.  
 - **Query**: "Is knee surgery covered under policy X?"  
-- System retrieves relevant section and returns an answer.  
+- System retrieves relevant section and returns an answer.
+
+---
 
 ## Contribution
 **Team Members:**
