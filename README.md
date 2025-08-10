@@ -1,4 +1,4 @@
-# 📄 Multilingual LLM-Powered Intelligent Query–Retrieval System
+# 📄 LLM-Powered Intelligent Query–Retrieval System
 
 ## 📌 Problem Statement
 Design and implement an **LLM-powered intelligent query–retrieval system** that can process large, unstructured, and multilingual documents to answer **contextual, domain-specific questions**.  
