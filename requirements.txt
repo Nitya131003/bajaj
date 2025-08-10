@@ -18,3 +18,4 @@ requests
 pdf2image
 pytesseract
 Pillow
+beautifulsoup4
