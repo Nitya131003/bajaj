@@ -222,59 +222,111 @@ async def ask_question(query: str, chain) -> str:
 # ---------- Helper: parse city-landmark table and endpoints from document ----------
 def parse_city_landmark_pairs(doc_text: str) -> dict:
     """
-    Parse lines like 'Eiffel Tower New York' or 'Gateway of India Delhi' into a mapping
-    city_name_lower -> landmark string.
+    Robust parser for lines like:
+      "🏛 Gateway of India   Delhi"
+      "Eiffel Tower    New York"
+    Strategy:
+      1) prefer splitting lines on multiple spaces (table-style extraction)
+      2) fallback to conservative regex that captures 'landmark ... City' but rejects narrative sentences
     """
     mapping = {}
     lines = doc_text.splitlines()
+
+    # 1) table style: look for two-or-more-space separated columns
     for line in lines:
-        # drop leading non-alphanumeric (emojis, bullets)
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        # prefer obvious table rows where there are multiple spaces between columns
+        if re.search(r'\s{2,}', cleaned):
+            parts = re.split(r'\s{2,}', cleaned)
+            if len(parts) >= 2:
+                landmark = re.sub(r'^[^\w]+', '', parts[0]).strip()
+                city = parts[-1].strip()
+                if city and landmark:
+                    mapping[city.lower()] = landmark
+    # if we found enough mappings via table-style, return them
+    if mapping:
+        return mapping
+
+    # 2) conservative regex fallback: "Landmark City" where City is 1-3 Title-cased words
+    pronouns = {'he', 'she', 'they', 'sachin', 'you', 'your', 'the'}
+    for line in lines:
         cleaned = re.sub(r'^[^\w]+', '', line).strip()
         if not cleaned:
             continue
-        # Skip header lines
-        if re.search(r'Landmark Current Location', cleaned, re.I):
+        # skip obvious long narrative sentences (heuristic)
+        if len(cleaned) > 120:
             continue
-        # Try pattern: landmark (words with capitalization) followed by city (capitalized words)
-        m = re.match(r'(.+?)\s+([A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)*)\s*$', cleaned)
+        m = re.match(r'(.+?)\s+([A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*){0,2})\s*$', cleaned)
         if m:
             landmark = m.group(1).strip()
             city = m.group(2).strip()
+            # reject if landmark starts with a pronoun or is too long
+            first_word = landmark.split()[0].lower() if landmark.split() else ''
+            if first_word in pronouns:
+                continue
+            if len(landmark.split()) > 8:
+                continue
             mapping[city.lower()] = landmark
     return mapping
 
 def parse_landmark_endpoints(doc_text: str) -> (dict, str):
     """
-    Find lines matching:
-      If landmark belonging to favourite city is "Gateway of India", call:
-      GET https://register.hackrx.in/teams/public/flights/getFirstCityFlightNumber
-    and also find the default endpoint 'For all other landmarks, call: GET ...'
+    Robustly find lines with:
+      If landmark ... "Gateway of India" ... GET https://...
+    and also find the default GET for "For all other landmarks" lines.
     Returns (landmark_to_endpoint_dict, favourite_city_url_or_default)
     """
     landmark_to_endpoint = {}
 
-    # Attempt to locate the "If landmark ... call: GET <url>" occurrences
-    pattern = re.compile(
-        r'If\s+landmark.*?is\s*(?:"|“)?([^"”\n,]+?)(?:"|”)?\s*[,:\n].*?GET\s*(https?://\S+)',
-        re.I | re.S
-    )
-    for lm, url in pattern.findall(doc_text):
-        landmark_to_endpoint[lm.strip()] = url.strip()
+    # find all flight endpoints in doc_text
+    url_pattern = re.compile(r'(https?://register\.hackrx\.in/teams/public/flights/\S+)', re.I)
+    urls = list(url_pattern.finditer(doc_text))
 
-    # default endpoint
+    # For each url found, look backwards for quoted landmark or nearby phrase
+    for m in urls:
+        url = m.group(1).strip()
+        start_idx = m.start(1)
+        lookback_start = max(0, start_idx - 400)
+        lookback = doc_text[lookback_start:start_idx]
+        # 1) try quoted landmark in lookback
+        qmatch = re.search(r'["“\']\s*([^"”\']{1,80}?)\s*["”\']', lookback[::-1])  # reversed search hack
+        # Instead of reversed complexity, do forward search in lookback for last quoted group
+        quotes = re.findall(r'["“\']\s*([^"”\']{1,120}?)\s*["”\']', lookback)
+        if quotes:
+            landmark = quotes[-1].strip()
+            landmark_to_endpoint[landmark] = url
+            continue
+        # 2) try pattern 'If landmark ... is X' within lookback
+        m2 = re.search(r'If\s+landmark.*?is\s*(?:"|“)?([^"”\n,]+?)(?:"|”)?', lookback, re.I | re.S)
+        if m2:
+            landmark = m2.group(1).strip()
+            landmark_to_endpoint[landmark] = url
+            continue
+        # 3) try to find a landmark-like phrase (caps words) near url
+        m3 = re.search(r'([A-Z][A-Za-z\s\-]{1,80})\s*$', lookback)
+        if m3:
+            landmark = m3.group(1).strip()
+            landmark_to_endpoint[landmark] = url
+            continue
+        # If nothing matched, set as DEFAULT if not already set
+        landmark_to_endpoint.setdefault("DEFAULT", url)
+
+    # find default endpoint explicitly mentioned with "For all other landmarks"
     m_def = re.search(r'For\s+all\s+other\s+landmarks.*?GET\s*(https?://\S+)', doc_text, re.I | re.S)
     if m_def:
         landmark_to_endpoint["DEFAULT"] = m_def.group(1).strip()
 
-    # favourite city URL (fallback to the known URL if not found in doc)
+    # favourite-city endpoint (explicit)
     fav_m = re.search(r'GET\s*(https?://register\.hackrx\.in/submissions/myFavouriteCity)', doc_text, re.I)
     fav_url = fav_m.group(1).strip() if fav_m else "https://register.hackrx.in/submissions/myFavouriteCity"
 
-    # If still empty and not all endpoints found, also attempt to find any other register.hackrx.in flight endpoints
+    # as a last resort, if no endpoints found, try to find ANY register.hackrx.in flights and set as default
     if not landmark_to_endpoint:
-        for match in re.findall(r'(https?://register\.hackrx\.in/teams/public/flights/\S+)', doc_text, re.I):
-            # cannot map to landmark without context — leave unmapped, but include default fallback
-            landmark_to_endpoint.setdefault("DEFAULT", match)
+        any_flights = re.findall(r'(https?://register\.hackrx\.in/teams/public/flights/\S+)', doc_text, re.I)
+        if any_flights:
+            landmark_to_endpoint["DEFAULT"] = any_flights[0]
 
     return landmark_to_endpoint, fav_url
 
@@ -312,93 +364,51 @@ def extract_flightnumber_from_response(resp: requests.Response) -> str:
         return m.group(1).strip()
     return text
 
-def _get_flight_number_via_api_sequence(doc_text: str) -> str:
-    """
-    Implements the step-by-step flow from the PDF using the parsed doc_text:
-    1) Get favourite city (URL parsed from doc_text if present)
-    2) Parse city->landmark mapping from doc_text
-    3) Parse landmark->endpoint mapping from doc_text
-    4) Choose endpoint, call and extract flight number
-    """
+def _get_flight_number_via_api_sequence(doc_text=None) -> str:
     try:
-        # Parse mapping and endpoints from the doc text
-        city_to_landmark = parse_city_landmark_pairs(doc_text)
-        landmark_to_endpoint, fav_url = parse_landmark_endpoints(doc_text)
-        logger.info(f"[flight-flow] parsed {len(city_to_landmark)} city->landmark mappings and {len(landmark_to_endpoint)} endpoints")
+        # Step 1: Get favourite city from API
+        city_resp = requests.get("https://register.hackrx.in/submissions/myFavouriteCity", timeout=10)
+        city_resp.raise_for_status()
+        city_name = city_resp.text.strip()
+        logger.info(f"[flight-flow] favourite city from API: {city_name!r}")
 
-        # Step 1: call favourite city endpoint
-        fav_resp = requests.get(fav_url, timeout=10)
-        fav_resp.raise_for_status()
-
-        # Try JSON extraction for city
-        city_name = None
-        try:
-            fav_json = fav_resp.json()
-            # common shapes: {"data":{"city":"Chennai"}}, {"city":"Chennai"}, or plain
-            if isinstance(fav_json, dict):
-                if "data" in fav_json and isinstance(fav_json["data"], dict) and "city" in fav_json["data"]:
-                    city_name = fav_json["data"]["city"]
-                elif "city" in fav_json:
-                    city_name = fav_json["city"]
-        except Exception:
-            # not json
-            pass
-
-        if not city_name:
-            # fallback to text
-            city_name = fav_resp.text.strip()
-
-        city_name = (city_name or "").strip()
-        logger.info(f"[flight-flow] favourite city from API: {json.dumps(city_name, ensure_ascii=False)}")
-
-        if not city_name:
-            logger.info("[flight-flow] no city returned by favourite-city API")
-            return None
-
-        # Normalize city
-        city_norm = re.sub(r'[^A-Za-z\s]', '', city_name).strip().lower()
-
-        # Step 2: map city -> landmark
-        landmark = city_to_landmark.get(city_norm)
+        # Step 2: Map city to landmark
+        landmark = _map_city_to_landmark(city_name)
         if not landmark:
-            # attempt a secondary search: find a line containing the city and extract a preceding phrase as landmark
-            # Try title-case city for matching in doc_text
-            city_title = " ".join([w.capitalize() for w in city_norm.split()])
-            m = re.search(r'([A-Za-z][A-Za-z\s\'\-]{2,60}?)\s+' + re.escape(city_title) + r'\b', doc_text)
-            if m:
-                landmark = m.group(1).strip()
-        logger.info(f"[flight-flow] mapped city {city_name!r} -> landmark {landmark!r}")
-
-        # Step 3: pick endpoint
-        endpoint = None
-        if landmark:
-            # try exact match or case-insensitive match against parsed landmark endpoints
-            for lm_key, url in landmark_to_endpoint.items():
-                if lm_key.lower() == landmark.lower():
-                    endpoint = url
-                    break
-            if not endpoint:
-                # fuzzy: check if lm_key is substring of landmark or vice versa
-                for lm_key, url in landmark_to_endpoint.items():
-                    if lm_key.lower() in landmark.lower() or landmark.lower() in lm_key.lower():
-                        endpoint = url
-                        break
-        # fallback to default endpoint parsed from doc
-        if not endpoint:
-            endpoint = landmark_to_endpoint.get("DEFAULT")
-        if not endpoint:
-            logger.info("[flight-flow] no flight endpoint available in document")
+            logger.error(f"[flight-flow] could not map city '{city_name}' to a landmark")
             return None
+        logger.info(f"[flight-flow] mapped city '{city_name}' -> landmark '{landmark}'")
 
+        # Step 3: Map landmark to API endpoint (hardcoded from PDF)
+        endpoint = _LANDMARK_TO_ENDPOINT.get(landmark)
+        if not endpoint:
+            logger.error(f"[flight-flow] no endpoint mapping for landmark '{landmark}'")
+            return None
         logger.info(f"[flight-flow] calling flight endpoint: {endpoint}")
+
+        # Step 4: Call flight number API
         flight_resp = requests.get(endpoint, timeout=10)
         flight_resp.raise_for_status()
-        flight_number = extract_flightnumber_from_response(flight_resp)
-        logger.info(f"[flight-flow] fetched flight number: {flight_number!r}")
-        return flight_number
+
+        try:
+            parsed = flight_resp.json()
+            if isinstance(parsed, dict):
+                for k in ("flight", "flight_number", "flightNumber", "data"):
+                    if k in parsed:
+                        return str(parsed[k]).strip()
+            if isinstance(parsed, (str, int)):
+                return str(parsed).strip()
+        except:
+            pass
+
+        # Step 5: Regex fallback if JSON parse fails
+        m = re.search(r'([A-Z]{2,3}\s?-?\d{1,5}|[A-Z0-9\-]{3,20})', flight_resp.text)
+        return m.group(1).strip() if m else flight_resp.text.strip()
+
     except Exception as e:
         logger.exception("[flight-flow] failed to fetch flight number")
         return None
+
 
 async def get_raw_content_if_api(url: str):
     try:
@@ -529,4 +539,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
