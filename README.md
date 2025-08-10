@@ -41,4 +41,29 @@ We have comprehensively addressed the problem statement by creating a system tha
 
 ---
 
-## 📂 Project Structure
+## Caching & Persistence
+- Uses **FAISS** for persistent local storage.  
+- Cache prevents redundant embedding generation.  
+
+## Prompting & Explainability
+- Prompts are crafted to extract relevant, context-aware answers.  
+- Debug logs explain processing steps.    
+
+## Troubleshooting & Known Issues
+- Large documents may need chunking.  
+- Network timeouts if document URLs are slow.  
+- Check permissions for persistent storage directory.  
+
+## Example: Sample Policy Test (Knee Surgery)
+- Upload medical policy documents.  
+- **Query**: "Is knee surgery covered under policy X?"  
+- System retrieves relevant section and returns an answer.  
+
+## Contribution
+**Team Members:**
+- Yogya Asnani  
+- Chetan Sharma  
+- Arya Singh  
+- Nitya Jain  
+- Radhika Jain
+
